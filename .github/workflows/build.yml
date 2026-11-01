@@ -10,9 +10,9 @@ on:
   workflow_dispatch:
     inputs:
       archive:
-        description: 'Repository-relative path to the Island source ZIP'
+        description: 'Island source ZIP filename'
         required: false
-        default: 'island-v6-complete.zip'
+        default: 'island-v7-premium.zip'
         type: string
 
 permissions:
@@ -24,12 +24,12 @@ concurrency:
 
 jobs:
   build:
-    name: Extract, compile and publish APK
+    name: Build Island V7 APK
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
     steps:
-      - name: Check out repository
+      - name: Checkout repository
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
@@ -43,10 +43,8 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
 
-      - name: Install Android build components
-        shell: bash
+      - name: Install Android SDK components
         run: |
-          set -euo pipefail
           sdkmanager \
             'platform-tools' \
             'platforms;android-34' \
@@ -58,7 +56,7 @@ jobs:
           gradle-version: '8.9'
           cache-provider: basic
 
-      - name: Find and extract Island source ZIP
+      - name: Find and extract V7 ZIP
         id: project
         shell: bash
         env:
@@ -69,20 +67,19 @@ jobs:
           ARCHIVE="$ARCHIVE_INPUT"
 
           if [[ -z "$ARCHIVE" ]]; then
-            mapfile -t CHANGED_ARCHIVES < <(
+            mapfile -t FILES < <(
               git show --pretty='' --name-only "$GITHUB_SHA" |
               grep -Ei '(^|/)island-[^/]*\.zip$' || true
             )
-
-            if (( ${#CHANGED_ARCHIVES[@]} > 0 )); then
-              ARCHIVE="${CHANGED_ARCHIVES[-1]}"
+            if (( ${#FILES[@]} > 0 )); then
+              ARCHIVE="${FILES[-1]}"
             else
-              ARCHIVE="$(find . -maxdepth 3 -type f -iname 'island-*.zip' | sort -V | tail -n 1)"
+              ARCHIVE="$(find . -maxdepth 3 -iname 'island-*.zip' -type f | sort -V | tail -n 1)"
             fi
           fi
 
-          if [[ -z "$ARCHIVE" || ! -f "$ARCHIVE" ]]; then
-            echo "Island source ZIP not found." >&2
+          if [[ ! -f "$ARCHIVE" ]]; then
+            echo "Island ZIP not found: $ARCHIVE"
             exit 1
           fi
 
@@ -90,66 +87,53 @@ jobs:
           mkdir -p "$DEST"
           unzip -q "$ARCHIVE" -d "$DEST"
 
-          mapfile -d '' SETTINGS_FILES < <(
+          mapfile -d '' SETTINGS < <(
             find "$DEST" -type f \
-              \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) \
+              \( -name settings.gradle -o -name settings.gradle.kts \) \
               -print0
           )
 
-          if (( ${#SETTINGS_FILES[@]} != 1 )); then
-            echo "Expected exactly one Gradle settings file." >&2
+          if (( ${#SETTINGS[@]} != 1 )); then
+            echo "Expected one Gradle settings file."
             exit 1
           fi
 
-          PROJECT_DIR="$(dirname "${SETTINGS_FILES[0]}")"
+          PROJECT="$(dirname "${SETTINGS[0]}")"
 
-          if [[ ! -f "$PROJECT_DIR/app/build.gradle" && ! -f "$PROJECT_DIR/app/build.gradle.kts" ]]; then
-            echo "App Gradle file missing." >&2
-            exit 1
-          fi
+          test -f "$PROJECT/app/src/main/AndroidManifest.xml"
+          test -f "$PROJECT/app/build.gradle" || \
+            test -f "$PROJECT/app/build.gradle.kts"
 
-          if [[ ! -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml" ]]; then
-            echo "AndroidManifest.xml missing." >&2
-            exit 1
-          fi
+          echo "dir=$PROJECT" >> "$GITHUB_OUTPUT"
 
-          echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-          echo "Project extracted successfully." >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Build Island APK
+      - name: Build APK
         working-directory: ${{ steps.project.outputs.dir }}
-        shell: bash
         run: |
-          set -euo pipefail
           gradle --no-daemon --console=plain --stacktrace clean assembleDebug
 
-      - name: Verify APK and calculate checksum
-        id: apk
+      - name: Verify APK
+        id: verify
         working-directory: ${{ steps.project.outputs.dir }}
-        shell: bash
         run: |
           set -euo pipefail
 
           APK="app/build/outputs/apk/debug/app-debug.apk"
           test -s "$APK"
 
-          ls -lh "$APK"
-
           SHA256="$(sha256sum "$APK" | awk '{print $1}')"
           echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
 
           {
-            echo "## Island APK build succeeded"
-            echo ""
-            echo "- APK: app-debug.apk"
-            echo "- SHA-256: $SHA256"
-            echo "- Version: 6.0 (code 6)"
+            echo "## Island V7 build successful"
+            echo "Version: 7.0"
+            echo "Version code: 7"
+            echo "SHA-256: $SHA256"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload installable APK
+      - name: Upload V7 APK
         uses: actions/upload-artifact@v7
         with:
-          name: Island-V6-debug-APK
+          name: Island-V7-debug-APK
           path: ${{ steps.project.outputs.dir }}/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 30
