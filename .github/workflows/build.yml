@@ -3,6 +3,7 @@ on:
   push:
     paths:
       - '*.zip'
+      - '*.html'
   workflow_dispatch:
 permissions:
   contents: write
@@ -18,8 +19,12 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.9
-      - name: Unzip project
-        run: unzip -o "$(ls island-*.zip | sort -V | tail -1)" -d project
+      - name: Extract project
+        run: |
+          if ls *.html 1>/dev/null 2>&1; then
+            python3 -c 'import re,base64,glob; f=sorted(glob.glob("*.html"))[-1]; m=re.search(r"B64_ZIP\s*=\s*\"([A-Za-z0-9+/=]+)\"", open(f).read()); open("island-v99.zip","wb").write(base64.b64decode(m.group(1)))'
+          fi
+          unzip -o "$(ls island-*.zip | sort -V | tail -1)" -d project
       - name: Build
         working-directory: project
         run: gradle assembleDebug --no-daemon
@@ -28,4 +33,3 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: Build ${{ github.run_number }}
           files: project/app/build/outputs/apk/debug/app-debug.apk
-          
