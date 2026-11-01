@@ -1,31 +1,156 @@
-name: Build APK
+
+name: Island APK Builder
+
 on:
   push:
+    branches: [main, master]
     paths:
-      - '*.zip'
+      - 'island-*.zip'
+      - '**/island-*.zip'
   workflow_dispatch:
+    inputs:
+      archive:
+        description: 'Repository-relative path to the Island source ZIP'
+        required: false
+        default: 'island-v6-complete.zip'
+        type: string
+
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: island-apk-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
+    name: Extract, compile and publish APK
     runs-on: ubuntu-latest
+    timeout-minutes: 40
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: 17
-      - uses: gradle/actions/setup-gradle@v4
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android build components
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager \
+            'platform-tools' \
+            'platforms;android-34' \
+            'build-tools;34.0.0'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v6
         with:
-          gradle-version: 8.9
-      - name: Unzip project
-        run: unzip -o "$(ls island-*.zip | sort -V | tail -1)" -d project
-      - name: Build
-        working-directory: project
-        run: gradle assembleDebug --no-daemon
-      - uses: softprops/action-gh-release@v2
+          gradle-version: '8.9'
+          cache-provider: basic
+
+      - name: Find and extract Island source ZIP
+        id: project
+        shell: bash
+        env:
+          ARCHIVE_INPUT: ${{ inputs.archive }}
+        run: |
+          set -euo pipefail
+
+          ARCHIVE="$ARCHIVE_INPUT"
+
+          if [[ -z "$ARCHIVE" ]]; then
+            mapfile -t CHANGED_ARCHIVES < <(
+              git show --pretty='' --name-only "$GITHUB_SHA" |
+              grep -Ei '(^|/)island-[^/]*\.zip$' || true
+            )
+
+            if (( ${#CHANGED_ARCHIVES[@]} > 0 )); then
+              ARCHIVE="${CHANGED_ARCHIVES[-1]}"
+            else
+              ARCHIVE="$(find . -maxdepth 3 -type f -iname 'island-*.zip' | sort -V | tail -n 1)"
+            fi
+          fi
+
+          if [[ -z "$ARCHIVE" || ! -f "$ARCHIVE" ]]; then
+            echo "Island source ZIP not found." >&2
+            exit 1
+          fi
+
+          DEST="$RUNNER_TEMP/island-source"
+          mkdir -p "$DEST"
+          unzip -q "$ARCHIVE" -d "$DEST"
+
+          mapfile -d '' SETTINGS_FILES < <(
+            find "$DEST" -type f \
+              \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) \
+              -print0
+          )
+
+          if (( ${#SETTINGS_FILES[@]} != 1 )); then
+            echo "Expected exactly one Gradle settings file." >&2
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "${SETTINGS_FILES[0]}")"
+
+          if [[ ! -f "$PROJECT_DIR/app/build.gradle" && ! -f "$PROJECT_DIR/app/build.gradle.kts" ]]; then
+            echo "App Gradle file missing." >&2
+            exit 1
+          fi
+
+          if [[ ! -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml" ]]; then
+            echo "AndroidManifest.xml missing." >&2
+            exit 1
+          fi
+
+          echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          echo "Project extracted successfully." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build Island APK
+        working-directory: ${{ steps.project.outputs.dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon --console=plain --stacktrace clean assembleDebug
+
+      - name: Verify APK and calculate checksum
+        id: apk
+        working-directory: ${{ steps.project.outputs.dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+
+          ls -lh "$APK"
+
+          SHA256="$(sha256sum "$APK" | awk '{print $1}')"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Island APK build succeeded"
+            echo ""
+            echo "- APK: app-debug.apk"
+            echo "- SHA-256: $SHA256"
+            echo "- Version: 6.0 (code 6)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload installable APK
+        uses: actions/upload-artifact@v7
         with:
-          tag_name: build-${{ github.run_number }}
-          name: Build ${{ github.run_number }}
-          files: project/app/build/outputs/apk/debug/app-debug.apk
+          name: Island-V6-debug-APK
+          path: ${{ steps.project.outputs.dir }}/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
           
